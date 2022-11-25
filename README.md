@@ -1,2 +1,2 @@
-# websocket
+# Golang Websocket Example
 websocket example
