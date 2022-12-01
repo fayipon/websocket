@@ -4,40 +4,34 @@ import (
 	"fmt"
 	"encoding/json"
 	"net/http"
-    "io/ioutil"
+  //  "io/ioutil"
 	"time"
-	"strings"
-	"strconv"
+  //  "strings"
+  //	"strconv"
 	"github.com/gorilla/websocket"
 	"github.com/satori/go.uuid"
 )
 
 const (
-	ChatApiUrl	 string = "https://shopping166.net/chat/"
+	ChatApiUrl	 string = "https://shopping168.net/chatapi/"
 )
 
 
 // 是否使用DEBUG
 var isDebug = true
 
-//建立客戶端管理者
-var manager = ClientManager{
-	broadcast:  make(chan []byte),
-	privatemessage:  make(chan []byte),
-	register:   make(chan *Client),
-	unregister: make(chan *Client),
-	clients:    make(map[*Client]bool),
-}
-
 //客戶端管理
 type ClientManager struct {
 	//客戶端 map 儲存並管理所有的長連線client，線上的為true，不在的為false
 	clients map[*Client]bool
 
-	//web端傳送來的的message我們用broadcast來接收，並最後分發給所有的client
+	//broadcast
 	broadcast chan []byte
 
-	//web端傳送來的的message我們用broadcast來接收，並最後分發給所有的client
+	//channel
+	channel chan []byte
+
+	//privatemessage
 	privatemessage chan []byte
 
 	//新建立的長連線client
@@ -52,13 +46,25 @@ type Client struct {
 	//使用者id
 	id string
 	//使用者id
-	buyer_id string
-	//使用者email
-	email string
+	account_id string
+	//account
+	account string
+	// 當前頻道
+	channel string
 	//連線的socket
 	socket *websocket.Conn
 	//傳送的訊息
 	send chan []byte
+}
+
+//建立客戶端管理者
+var manager = ClientManager{
+	broadcast:  make(chan []byte),
+	channel:  make(chan []byte),
+	privatemessage:  make(chan []byte),
+	register:   make(chan *Client),
+	unregister: make(chan *Client),
+	clients:    make(map[*Client]bool),
 }
 
 //會把Message格式化成json
@@ -67,17 +73,47 @@ type Message struct {
 	Sender    string `json:"sender,omitempty"`    //傳送者 email
 	Revicer string `json:revicer,omitempty`
 
-	// 比照Laravel 格式
+	// 比照ThinkPHP 格式
 	Data   string `json:"data,omitempty"`   //內容
 	Message   string `json:"message,omitempty"`   //訊息
 	Status   string `json:"status,omitempty"`   //狀態
 }
 
+// 接收
 type ReviceMessage struct {
 	Action  string `json:"action"`
-	Email 	string `json:"email"`
-	Token 	string `json:"token"`
-	Info 	string `json:"info"`
+	Data 	string `json:"data,omitempty"`
+	Channel string `json:"channel,omitempty"`
+	Account string `json:"account,omitempty"`
+	Id string `json:"id,omitempty"`
+	Message string `json:"message,omitempty"`
+	Status 	string `json:"status,omitempty"`
+}
+
+// 回覆 廣播
+type ReplyBroadcastMessage struct {
+	Action  string `json:"action"` 
+	Data 	string `json:"data,omitempty"`
+	Message string `json:"message,omitempty"`
+	Status 	string `json:"status,omitempty"`
+}
+
+// 回覆 頻道
+type ReplyChannelMessage struct {
+	Action  string `json:"action"` 
+	Channel string `json:"channel,omitempty"`
+	Data 	string `json:"data,omitempty"`
+	Message string `json:"message,omitempty"`
+	Status 	string `json:"status,omitempty"`
+}
+
+// 回覆 私訊
+type ReplyPrivateMessage struct {
+	Action  string `json:"action"` 
+	Revicer string `json:"revicer,omitempty"`
+	Data 	string `json:"data,omitempty"`
+	Message string `json:"message,omitempty"`
+	Status 	string `json:"status,omitempty"`
 }
 
 
@@ -108,55 +144,55 @@ func (manager *ClientManager) start() {
 		//廣播
 		case message := <-manager.broadcast:
 
-			// debug , 發送內容
-			DebugLog(string(message))
+			//遍歷已經連線的客戶端，把訊息傳送給他們
+			for conn := range manager.clients {
+					
+					select {
+						case conn.send <- message:
+						default:
+							close(conn.send)
+							delete(manager.clients, conn)
+					}
+			}
+
+		//頻道
+		case message := <-manager.channel:
+
+			var revice_message ReviceMessage
+			json.Unmarshal(message, &revice_message)
 
 			//遍歷已經連線的客戶端，把訊息傳送給他們
 			for conn := range manager.clients {
-				select {
-					case conn.send <- message:
-					default:
-						close(conn.send)
-						delete(manager.clients, conn)
+				// 判斷頻道是否一致
+				if (conn.channel == revice_message.Channel) {
+					select {
+						case conn.send <- message:
+						default:
+							close(conn.send)
+							delete(manager.clients, conn)
+					}
 				}
+
 			}
 
 		// 私聊
 		case message := <-manager.privatemessage:
 			
-			DebugLog("privatemessage")
-			DebugLog("================")
+			var revice_message ReplyPrivateMessage
+			json.Unmarshal(message, &revice_message)
 
 			for conn := range manager.clients {
-				
-				var revice_message ReviceMessage
-				json.Unmarshal(message, &revice_message)
-				
-				if (string(conn.buyer_id) == revice_message.Revicer) {
 
+				// 判斷私聊是否一致
+				if (conn.account_id == revice_message.Revicer) {
 					select {
-					case conn.send <- message:
-					default:
+						case conn.send <- message:
+						default:
+							close(conn.send)
+							delete(manager.clients, conn)
 					}
-					
-					DebugLog("Revicer : " + revice_message.Revicer)
-					DebugLog("Private message DONE")
 				}
-
-				if (string(conn.email) == revice_message.Email) {
-
-					select {
-					case conn.send <- message:
-					default:
-					}
-					
-					DebugLog("Sender : " + revice_message.Email)
-					DebugLog("Private message DONE")
-				}
-
 			}
-
-			DebugLog("================")
 
 		}
 	}
@@ -200,72 +236,70 @@ func (c *Client) read() {
 		json.Unmarshal(message, &revice_message)
 
 		fmt.Println(revice_message)
+		
+		////////////////////////////////////////
+
 
 		// 依據Action , 做區別處理
 		switch revice_message.Action {
-			// 注冊
-			case "register":
-				if c.email == "" {
-	
-					// 如果還未注冊
-					DebugLog("Register Done")
-				} else {
-					DebugLog("Register Already")
-				}
-	
-				jsonMessage, _ := json.Marshal(&InitMessage{
-						Action: "init",
-						Email:revice_message.Email, 
-						Token:revice_message.Token, 
-						Revicer: 111, 
-						Content: string(data)})
-						
-				manager.privatemessage <- jsonMessage
 	
 		// 心跳
 		case "heartbeat":
 
+			DebugLog("heartbeat")
 			timeUnix := time.Now().Format("2006-01-02 15:04:05")
 
-			jsonMessage, _ := json.Marshal(&InitMessage{
+			jsonMessage, _ := json.Marshal(&ReplyPrivateMessage{
 				Action: "heartbeat",
-				Email:revice_message.Email, 
-				Token:revice_message.Token, 
-				Sender: buyerOnline.BuyerId, 
-				Revicer: buyerOnline.BuyerId, 
-				Content: timeUnix})
+				Data: timeUnix,
+				Status: "1"})
 				
 			manager.privatemessage <- jsonMessage
 	
-		// 私聊
-		case "private":
+		// 頻道
+		case "register":
 
-			timeUnix := time.Now().Format("2006-01-02 15:04:05")
+			c.channel	 = revice_message.Channel
+			c.account	 = revice_message.Account
+			c.account_id = revice_message.Id
 
-			jsonMessage, _ := json.Marshal(&ChatMessage{
-					Action:  "private",
-					Email:revice_message.Email, 
-					Token:revice_message.Token, 
-					Revicer: revice_message.Revicer, 
-					Content:revice_message.Info,
-					Datetime: timeUnix})
+			jsonMessage, _ := json.Marshal(&ReplyPrivateMessage{
+				Action: "register",
+				Revicer: c.account_id,
+				Message: "regist success",
+				Status:  "1"})
 
 			manager.privatemessage <- jsonMessage
-			
 
-		// 廣播 , 暫時沒有場景
+		// 私聊
+		case "private":
+			DebugLog("private")
+				
+		// 廣播
 		case "broadcast":
 				
-			timeUnix := time.Now().Format("2006-01-02 15:04:05")
-
-			jsonMessage, _ := json.Marshal(&InitMessage{
+			DebugLog("broadcast")
+			jsonMessage, _ := json.Marshal(&ReplyBroadcastMessage{
 				Action: "broadcast",
-				Email:revice_message.Email, 
-				Token:revice_message.Token,
-				Content: revice_message.Info,
-				Datetime: timeUnix})
+				Data: revice_message.Data,
+				Message: string(time.Now().Format("2006-01-02 15:04:05")),
+				Status:  "1"})
 
 			manager.broadcast <- jsonMessage
+
+		// 頻道
+		case "channel":
+					
+			DebugLog("channel")
+
+			jsonMessage, _ := json.Marshal(&ReplyChannelMessage{
+				Action: "channel",
+				Channel: revice_message.Channel,
+				Data: revice_message.Data,
+				Message: string(time.Now().Format("2006-01-02 15:04:05")),
+				Status:  "1"})
+
+			manager.channel <- jsonMessage
 
 		default:
 			DebugLog("default")
@@ -342,7 +376,6 @@ func wsHandler(res http.ResponseWriter, req *http.Request) {
 
 // debug log 
 func DebugLog(message string) {
-
 	if (isDebug) {
 		fmt.Println("[" + string(time.Now().Format("2006-01-02 15:04:05")) + "] " + message)
 	}
